@@ -3,100 +3,55 @@ import pandas as pd
 from datetime import datetime
 import os
 from pathlib import Path
-import urllib.parse
-import pickle
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import tempfile
-import json
+import base64
+import io
+from PIL import Image
+import requests
 
-# --- Google Drive Setup ---
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Damage Invoice Tracker", 
+    layout="wide",
+    initial_sidebar_state="collapsed",
+    menu_items={
+        'About': "Damage tracker for legal proceedings"
+    }
+)
 
-def authenticate_google_drive():
-    """Authenticate and return Google Drive service instance"""
-    creds = None
-    
-    # Token file stores the user's access and refresh tokens
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    
-    # If there are no (valid) credentials available, let the user log in
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            # You'll need to create credentials.json from Google Cloud Console
-            if os.path.exists('credentials. json'):
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-            else:
-                st.error("credentials.json not found. Please set up Google Drive API credentials.")
-                return None
-        
-        # Save the credentials for the next run
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
-    
-    return build('drive', 'v3', credentials=creds)
-
-def extract_folder_id_from_url(url):
-    """Extract folder ID from Google Drive URL"""
-    if "drive.google.com" in url:
-        # Handle different Google Drive URL formats
-        if "/folders/" in url:
-            folder_id = url.split("/folders/")[1].split("?")[0]
-            return folder_id
-        elif "id=" in url:
-            folder_id = url.split("id=")[1].split("&")[0]
-            return folder_id
-    return url  # Return as-is if not a recognized Google Drive URL
-
-def upload_to_google_drive(service, file_content, filename, folder_id, mime_type='application/octet-stream'):
-    """Upload a file to Google Drive and return the shareable link"""
-    try:
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp_file:
-            tmp_file.write(file_content)
-            tmp_file_path = tmp_file.name
-        
-        file_metadata = {
-            'name': filename,
-            'parents': [folder_id] if folder_id else []
+# --- Custom CSS for mobile responsiveness ---
+st.markdown("""
+<style>
+    /* Mobile responsive adjustments */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
         }
-        
-        media = MediaFileUpload(tmp_file_path, mimetype=mime_type, resumable=True)
-        
-        # Upload file
-        file = service. files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink'
-        ).execute()
-        
-        # Clean up temp file
-        os.unlink(tmp_file_path)
-        
-        # Get the shareable link
-        file_id = file.get('id')
-        
-        # Make the file publicly viewable (optional - comment out if not needed)
-        service.permissions().create(
-            fileId=file_id,
-            body={'type': 'anyone', 'role': 'reader'}
-        ).execute()
-        
-        # Return the direct link
-        return f"https://drive.google.com/file/d/{file_id}/view"
+        .stButton > button {
+            width: 100%;
+            margin-top: 0.5rem;
+        }
+    }
     
-    except Exception as e:
-        st.error(f"Error uploading to Google Drive: {e}")
-        return None
+    /* Make file uploader more prominent */
+    .uploadedFile {
+        background-color: #f0f8ff;
+        border-radius: 5px;
+        padding: 10px;
+    }
+    
+    /* Style for clickable links */
+    .receipt-link {
+        color: #0066cc;
+        text-decoration: none;
+        font-weight: bold;
+    }
+    
+    .receipt-link:hover {
+        text-decoration: underline;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # --- Config ---
 CATEGORY_LIST = [
@@ -165,239 +120,220 @@ SUBCATEGORIES = {
     ]
 }
 
-DEFAULT_UPLOADS = "uploads"
-os.makedirs(DEFAULT_UPLOADS, exist_ok=True)
-
-# --- Session defaults for data storage ---
+# --- Initialize Session State ---
 if "damages" not in st.session_state:
     st.session_state["damages"] = []
 
-if "gdrive_service" not in st.session_state:
-    st.session_state["gdrive_service"] = None
+if "drive_folder_url" not in st.session_state:
+    st.session_state["drive_folder_url"] = ""
 
-if "gdrive_folder_id" not in st.session_state:
-    st.session_state["gdrive_folder_id"] = None
+if "drive_folder_configured" not in st.session_state:
+    st.session_state["drive_folder_configured"] = False
 
-# --- Properly initialize form keys with correct types BEFORE creating widgets ---
-if "title_input" not in st.session_state:
-    st.session_state["title_input"] = ""
-if "description_input" not in st.session_state:
-    st.session_state["description_input"] = ""
-if "date_input" not in st.session_state:
-    st.session_state["date_input"] = datetime.today()
-if "category_input" not in st.session_state:
-    st.session_state["category_input"] = CATEGORY_LIST[0]
-if "subcategory_input" not in st.session_state:
-    st.session_state["subcategory_input"] = ""
-if "custom_category_input" not in st.session_state:
-    st.session_state["custom_category_input"] = ""
-if "cost_input" not in st. session_state:
-    st. session_state["cost_input"] = 0.0
-if "image_input" not in st. session_state:
-    st. session_state["image_input"] = None
+if "uploaded_files_data" not in st.session_state:
+    st.session_state["uploaded_files_data"] = {}
 
-# Save location config stored per session
-if "save_config" not in st.session_state:
-    st.session_state["save_config"] = None
-if "save_config_set" not in st.session_state:
-    st.session_state["save_config_set"] = False
+# Initialize form fields
+form_fields = {
+    "title_input": "",
+    "description_input": "",
+    "date_input": datetime.today(),
+    "category_input": CATEGORY_LIST[0],
+    "subcategory_input": "",
+    "custom_category_input": "",
+    "cost_input": 0.0,
+    "image_input": None
+}
 
-st.set_page_config(page_title="Damage Invoice Tracker", layout="wide")
-st.title("⚖️ Damage Invoice Tracker for Legal Proceedings")
+for field, default in form_fields. items():
+    if field not in st.session_state:
+        st.session_state[field] = default
 
-# --- Google Drive Configuration (asked once per session) ---
-with st.expander("🔧 Configure Google Drive for Receipt Storage", expanded=not st.session_state["save_config_set"]):
-    st.write("Set up where your receipts and invoices will be stored.")
+# --- Helper Functions ---
+def create_download_link(file_data, filename):
+    """Create a download link for a file"""
+    b64 = base64.b64encode(file_data). decode()
+    mime_type = "application/octet-stream"
+    if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        mime_type = "image/jpeg"
+    elif filename.lower().endswith('.pdf'):
+        mime_type = "application/pdf"
+    return f'<a href="data:{mime_type};base64,{b64}" download="{filename}">Download {filename}</a>'
+
+def save_uploaded_file(uploaded_file):
+    """Save uploaded file to session state and return base64 data"""
+    bytes_data = uploaded_file.getvalue()
+    filename = uploaded_file.name
     
-    storage_type = st.radio(
-        "Storage Type",
-        ["Google Drive (Recommended)", "Local Storage"]
+    # Generate unique filename
+    timestamp = int(datetime.now().timestamp())
+    unique_filename = f"{timestamp}_{filename}"
+    
+    # Store in session state
+    st.session_state["uploaded_files_data"][unique_filename] = {
+        'data': bytes_data,
+        'original_name': filename,
+        'size': len(bytes_data)
+    }
+    
+    return unique_filename
+
+def generate_drive_link(folder_url, filename):
+    """Generate expected Google Drive link"""
+    if folder_url:
+        # Clean the folder URL
+        folder_url = folder_url.rstrip('/')
+        # For now, we'll create a placeholder link structure
+        # Users will need to manually upload and the link will work once the file is there
+        return f"{folder_url}/{filename}"
+    return filename
+
+# --- Main App ---
+st.title("⚖️ Damage Invoice Tracker")
+st.markdown("### Legal Proceedings Documentation System")
+
+# --- Configuration Section ---
+with st.expander("⚙️ Configure Google Drive Folder (One-time Setup)", expanded=not st.session_state["drive_folder_configured"]):
+    st.markdown("""
+    📁 **Set your Google Drive folder where receipts will be stored**
+    
+    1. Create or open a folder in Google Drive
+    2. Right-click → "Get link" → Set to "Anyone with the link can view"
+    3. Copy the folder URL and paste below
+    """)
+    
+    drive_url = st.text_input(
+        "Google Drive Folder URL:",
+        value=st.session_state. get("drive_folder_url", "https://drive.google.com/drive/folders/1HIu5XR7pFg8s49AG8Yiu_7aCK9HMeT8N"),
+        help="Example: https://drive.google.com/drive/folders/..."
     )
     
-    if storage_type == "Google Drive (Recommended)":
-        st.info("📁 Files will be uploaded to your Google Drive folder and links will be included in the spreadsheet.")
-        
-        # Check for credentials file
-        if not os.path.exists('credentials.json'):
-            st.warning("⚠️ Google Drive API credentials not found. Please follow these steps:")
-            st.markdown("""
-            1. Go to [Google Cloud Console](https://console. cloud.google.com/)
-            2. Create a new project or select existing
-            3. Enable Google Drive API
-            4. Create OAuth 2. 0 credentials
-            5. Download the credentials as `credentials.json`
-            6. Place it in the same directory as this script
-            """)
-            
-            # Alternative: Allow manual folder ID input
-            st.subheader("Alternative: Manual Configuration")
-            manual_folder_url = st.text_input(
-                "Paste your Google Drive folder URL:",
-                value="https://drive.google.com/drive/folders/1HIu5XR7pFg8s49AG8Yiu_7aCK9HMeT8N",
-                help="Example: https://drive.google.com/drive/folders/..."
-            )
-            
-            use_manual = st.checkbox("Use manual configuration (files will be saved locally with Google Drive links)")
-            
-            if st.button("Set Google Drive Folder"):
-                if use_manual and manual_folder_url:
-                    folder_id = extract_folder_id_from_url(manual_folder_url)
-                    st.session_state["gdrive_folder_id"] = folder_id
-                    st.session_state["save_config"] = {
-                        "type": "gdrive_manual",
-                        "folder_id": folder_id,
-                        "folder_url": manual_folder_url
-                    }
-                    st.session_state["save_config_set"] = True
-                    st.success(f"✅ Google Drive folder configured!  Folder ID: {folder_id}")
-        else:
-            folder_url = st.text_input(
-                "Google Drive Folder URL:",
-                value="https://drive. google.com/drive/folders/1HIu5XR7pFg8s49AG8Yiu_7aCK9HMeT8N",
-                help="Paste the URL of your Google Drive folder"
-            )
-            
-            if st. button("Connect to Google Drive"):
-                service = authenticate_google_drive()
-                if service:
-                    folder_id = extract_folder_id_from_url(folder_url)
-                    st.session_state["gdrive_service"] = service
-                    st.session_state["gdrive_folder_id"] = folder_id
-                    st.session_state["save_config"] = {
-                        "type": "gdrive",
-                        "folder_id": folder_id,
-                        "folder_url": folder_url
-                    }
-                    st.session_state["save_config_set"] = True
-                    st.success(f"✅ Connected to Google Drive! Folder ID: {folder_id}")
-                else:
-                    st.error("Failed to authenticate with Google Drive")
+    col1, col2 = st. columns([1, 3])
+    with col1:
+        if st.button("Save Configuration", type="primary", use_container_width=True):
+            st.session_state["drive_folder_url"] = drive_url
+            st.session_state["drive_folder_configured"] = True
+            st.success("✅ Configuration saved!")
+            st.rerun()
     
-    else:  # Local Storage
-        local_path = st.text_input("Local folder path:", value=DEFAULT_UPLOADS)
-        if st.button("Set Local Storage"):
-            os.makedirs(local_path, exist_ok=True)
-            st.session_state["save_config"] = {
-                "type": "local",
-                "path": local_path
-            }
-            st.session_state["save_config_set"] = True
-            st.success(f"✅ Local storage set to: {local_path}")
+    with col2:
+        st. info("ℹ️ You'll manually upload files to this folder.  The app generates the links.")
 
-if st.session_state["save_config_set"]:
-    cfg = st.session_state["save_config"]
-    if cfg["type"] == "gdrive":
-        st.success(f"✅ Connected to Google Drive folder")
-    elif cfg["type"] == "gdrive_manual":
-        st. info(f"📁 Manual Google Drive configuration - Folder URL: {cfg['folder_url']}")
-    else:
-        st.info(f"📁 Using local storage: {cfg. get('path', DEFAULT_UPLOADS)}")
+if st.session_state["drive_folder_configured"]:
+    st.success(f"✅ Connected to folder: `{st.session_state['drive_folder_url']}`")
 
-# --- Form: all widgets reference session-state keys ---
+# --- Entry Form ---
+st.markdown("---")
+st.subheader("📝 Add New Damage Entry")
+
 with st.form("damage_form", clear_on_submit=False):
-    st.subheader("📝 Enter a New Damage")
-    
-    col1, col2 = st.columns(2)
+    # Responsive columns - stack on mobile
+    col1, col2 = st.columns([1, 1])
     
     with col1:
-        title = st.text_input("Title*", key="title_input", help="Brief title for this damage")
-        category = st.selectbox("Category*", CATEGORY_LIST, key="category_input")
+        title = st.text_input(
+            "Title *",
+            key="title_input",
+            placeholder="Brief description"
+        )
+        
+        category = st.selectbox(
+            "Category *",
+            CATEGORY_LIST,
+            key="category_input"
+        )
         
         # Show subcategories if available
         if category in SUBCATEGORIES:
             subcategory = st.selectbox(
-                f"Subcategory for {category}",
+                f"Subcategory",
                 ["Select... "] + SUBCATEGORIES[category],
                 key="subcategory_input"
             )
+            
+            # Custom input for "Other" subcategory
+            if st.session_state.get("subcategory_input") == "Other":
+                custom_sub = st.text_input(
+                    "Specify:",
+                    key="custom_subcategory_input",
+                    placeholder="Enter custom subcategory"
+                )
         
-        # Show custom input for "Other" category or subcategory
-        if category == "Other" or (category in SUBCATEGORIES and st.session_state. get("subcategory_input") == "Other"):
-            custom_category = st.text_input("Please specify:", key="custom_category_input")
-        
-        cost = st.number_input(
-            "Cost (USD)*", 
-            min_value=0.0, 
-            step=0.01, 
-            format="%.2f", 
-            key="cost_input",
-            help="Enter the amount in USD"
-        )
+        # Custom input for "Other" main category
+        if category == "Other":
+            custom_cat = st.text_input(
+                "Specify category:",
+                key="custom_category_input",
+                placeholder="Enter custom category"
+            )
     
     with col2:
-        date = st.date_input("Date*", key="date_input", help="Date of the expense/damage")
-        description = st. text_area(
-            "Description (optional)", 
-            key="description_input",
-            height=100,
-            help="Additional details about this damage"
+        date = st.date_input(
+            "Date *",
+            key="date_input"
         )
-        image_file = st.file_uploader(
-            "Upload Receipt/Invoice (optional)", 
-            type=["png", "jpg", "jpeg", "pdf"], 
-            key="image_input",
-            help="Upload supporting documentation"
+        
+        cost = st.number_input(
+            "Cost (USD) *",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            key="cost_input",
+            placeholder=0.00
+        )
+        
+        description = st.text_area(
+            "Description",
+            key="description_input",
+            height=70,
+            placeholder="Additional details (optional)"
         )
     
-    submitted = st.form_submit_button("➕ Add Damage", use_container_width=True, type="primary")
+    # File upload - full width for better mobile experience
+    image_file = st.file_uploader(
+        "📎 Upload Receipt/Invoice",
+        type=["png", "jpg", "jpeg", "pdf"],
+        key="image_input",
+        help="Upload supporting documentation"
+    )
+    
+    # Submit button - full width on mobile
+    submitted = st.form_submit_button(
+        "➕ Add Damage Entry",
+        type="primary",
+        use_container_width=True
+    )
 
-# --- Handle submit ---
+# --- Handle Form Submission ---
 if submitted:
-    if not st.session_state["save_config_set"]:
-        st.warning("⚠️ Please configure storage location first (see configuration section above)")
-    elif not st.session_state["title_input"] or st.session_state["cost_input"] <= 0:
-        st.error("❌ Please provide a title and cost amount")
+    if not st.session_state["title_input"]:
+        st. error("❌ Please provide a title")
+    elif st.session_state["cost_input"] <= 0:
+        st.error("❌ Please enter a valid cost amount")
     else:
-        save_cfg = st.session_state["save_config"]
+        # Handle file upload
         filename = ""
-        image_url = ""
+        file_link = ""
         
-        # Handle image upload
         if image_file is not None:
-            # Generate unique filename
-            timestamp = int(datetime.now().timestamp())
-            original_name = Path(image_file.name).stem
-            extension = Path(image_file.name).suffix
-            filename = f"{timestamp}_{original_name}{extension}"
+            # Save file to session state
+            filename = save_uploaded_file(image_file)
             
-            # Get file content
-            file_content = image_file.getbuffer()
-            
-            # Upload based on configuration
-            if save_cfg["type"] == "gdrive" and st.session_state["gdrive_service"]:
-                # Upload to Google Drive
-                image_url = upload_to_google_drive(
-                    st. session_state["gdrive_service"],
-                    file_content,
-                    filename,
-                    st.session_state["gdrive_folder_id"]
-                )
-                if not image_url:
-                    st.error("Failed to upload to Google Drive")
-                    
-            elif save_cfg["type"] == "gdrive_manual":
-                # Save locally but create Google Drive link
-                local_path = os.path.join(DEFAULT_UPLOADS, filename)
-                with open(local_path, "wb") as f:
-                    f.write(file_content)
-                # Create expected Google Drive URL
-                folder_url = save_cfg["folder_url"]. rstrip("/")
-                image_url = f"{folder_url}/{filename}"
-                st.info(f"File saved locally.  Manual upload required to: {folder_url}")
-                
-            else:  # Local storage
-                local_path = os.path.join(save_cfg. get("path", DEFAULT_UPLOADS), filename)
-                with open(local_path, "wb") as f:
-                    f.write(file_content)
-                image_url = local_path
+            # Generate Google Drive link (for manual upload)
+            if st.session_state["drive_folder_configured"]:
+                file_link = generate_drive_link(st.session_state["drive_folder_url"], filename)
+            else:
+                file_link = filename
         
         # Determine final category
         if st.session_state["category_input"] == "Other":
-            final_category = st. session_state["custom_category_input"] or "Other"
-        elif st.session_state. get("subcategory_input") == "Other":
-            final_category = f"{st.session_state['category_input']} - {st. session_state['custom_category_input']}"
-        elif st.session_state. get("subcategory_input") and st.session_state. get("subcategory_input") != "Select...":
-            final_category = f"{st.session_state['category_input']} - {st.session_state['subcategory_input']}"
+            final_category = st.session_state. get("custom_category_input", "Other")
+        elif category in SUBCATEGORIES and st.session_state. get("subcategory_input") not in ["Select...", None, ""]:
+            if st.session_state.get("subcategory_input") == "Other":
+                subcategory_text = st.session_state. get("custom_subcategory_input", "Other")
+            else:
+                subcategory_text = st.session_state["subcategory_input"]
+            final_category = f"{st.session_state['category_input']} - {subcategory_text}"
         else:
             final_category = st.session_state["category_input"]
         
@@ -405,202 +341,224 @@ if submitted:
         entry = {
             "Title": st.session_state["title_input"],
             "Description": st.session_state["description_input"],
-            "Date": st.session_state["date_input"]. strftime("%Y-%m-%d"),
+            "Date": st.session_state["date_input"].strftime("%Y-%m-%d"),
             "Category": final_category,
             "Cost": float(st.session_state["cost_input"]),
-            "Receipt Filename": filename,
-            "Receipt Link": image_url
+            "Receipt": filename,
+            "Link": file_link
         }
         
         st.session_state["damages"].append(entry)
-        st.success("✅ Damage added successfully!")
         
-        # Clear form inputs
-        st.session_state["title_input"] = ""
-        st.session_state["description_input"] = ""
-        st.session_state["date_input"] = datetime.today()
-        st.session_state["category_input"] = CATEGORY_LIST[0]
-        st.session_state["subcategory_input"] = ""
-        st.session_state["custom_category_input"] = ""
-        st.session_state["cost_input"] = 0.0
-        st.session_state["image_input"] = None
+        # Show success message with instructions
+        st.success("✅ Damage entry added successfully!")
+        
+        if image_file and st.session_state["drive_folder_configured"]:
+            st.info(f"""
+            📤 **Next Step:** Upload `{filename}` to your Google Drive folder:
+            1. Download the file using the link below
+            2. Upload to your Google Drive folder
+            3. The link in the spreadsheet will work automatically
+            """)
+            
+            # Provide download link for the file
+            if filename in st.session_state["uploaded_files_data"]:
+                file_data = st.session_state["uploaded_files_data"][filename]['data']
+                st.download_button(
+                    label=f"⬇️ Download {filename} for Google Drive upload",
+                    data=file_data,
+                    file_name=filename,
+                    mime="application/octet-stream",
+                    key=f"download_{filename}"
+                )
+        
+        # Clear form
+        for field, default in form_fields.items():
+            st.session_state[field] = default
         st.rerun()
 
-# --- Display damages and analysis ---
-st.header("📊 Damage Summary")
+# --- Display Damages ---
+st.markdown("---")
+st. header("📊 Damage Summary & Export")
 
 if st.session_state["damages"]:
     df = pd.DataFrame(st.session_state["damages"])
     
     # Display metrics
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         total_cost = df["Cost"].sum()
-        st.metric("Total Damages", f"${total_cost:,.2f}")
+        st.metric("💰 Total Damages", f"${total_cost:,.2f}")
     with col2:
-        st.metric("Number of Entries", len(df))
+        st.metric("📝 Total Entries", len(df))
     with col3:
         avg_cost = df["Cost"].mean()
-        st.metric("Average Cost", f"${avg_cost:,.2f}")
+        st.metric("📊 Average Cost", f"${avg_cost:,.2f}")
+    with col4:
+        st.metric("📁 Categories", df["Category"].nunique())
     
     # Tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 All Entries", "📊 Category Analysis", "🔗 Receipt Links", "📥 Export"])
+    tab1, tab2, tab3 = st.tabs(["📋 All Entries", "📊 Analysis", "📥 Export"])
     
     with tab1:
-        st.subheader("All Damage Entries")
-        # Create display dataframe with formatted costs
-        display_df = df.copy()
-        display_df["Cost"] = display_df["Cost"].apply(lambda x: f"${x:,.2f}")
-        st.dataframe(
-            display_df[["Title", "Description", "Date", "Category", "Cost", "Receipt Filename"]],
-            use_container_width=True
-        )
+        # Display entries
+        for idx, row in df.iterrows():
+            with st.expander(f"{row['Title']} - ${row['Cost']:,.2f} ({row['Date']})"):
+                col1, col2 = st. columns([2, 1])
+                with col1:
+                    st.write(f"**Category:** {row['Category']}")
+                    if row['Description']:
+                        st.write(f"**Description:** {row['Description']}")
+                with col2:
+                    st.write(f"**Cost:** ${row['Cost']:,.2f}")
+                    st.write(f"**Date:** {row['Date']}")
+                
+                if row. get('Link') and row['Link']:
+                    if row['Link'].startswith('http'):
+                        st.markdown(f"📎 [View Receipt]({row['Link']})")
+                    else:
+                        st.write(f"📎 Receipt: {row. get('Receipt', 'N/A')}")
+                    
+                    # Provide download if file is in session
+                    if row.get('Receipt') in st.session_state. get("uploaded_files_data", {}):
+                        file_data = st.session_state["uploaded_files_data"][row['Receipt']]['data']
+                        st.download_button(
+                            "⬇️ Download Receipt",
+                            data=file_data,
+                            file_name=row['Receipt'],
+                            key=f"entry_download_{idx}"
+                        )
     
     with tab2:
-        st.subheader("Cost Analysis by Category")
+        # Category breakdown
+        st.subheader("Category Breakdown")
         
-        # Category summary
-        category_summary = (
-            df.groupby("Category")["Cost"]
-            .agg(["count", "sum", "mean"])
-            .rename(columns={
-                "count": "Number of Entries",
-                "sum": "Total Cost",
-                "mean": "Average Cost"
-            })
-            .reset_index()
-        )
-        category_summary["Total Cost"] = category_summary["Total Cost"].apply(lambda x: f"${x:,.2f}")
-        category_summary["Average Cost"] = category_summary["Average Cost"].apply(lambda x: f"${x:,.2f}")
+        category_summary = df.groupby("Category"). agg({
+            "Cost": ["count", "sum", "mean"]
+        }).round(2)
+        category_summary.columns = ["Count", "Total ($)", "Average ($)"]
+        category_summary = category_summary. sort_values("Total ($)", ascending=False)
         
         st.dataframe(category_summary, use_container_width=True)
         
-        # Simple bar chart
-        chart_df = df.groupby("Category")["Cost"].sum().reset_index()
-        st.bar_chart(chart_df.set_index("Category"))
+        # Simple chart
+        st.bar_chart(category_summary["Total ($)"])
     
     with tab3:
-        st.subheader("📎 Uploaded Receipts")
-        for idx, row in df.iterrows():
-            if row.get("Receipt Link"):
-                url = row["Receipt Link"]
-                name = row.get("Receipt Filename") or "Receipt"
-                title = row.get("Title", "")
-                
-                if str(url).startswith("http"):
-                    st. markdown(f"**{title}** - [{name}]({url}) 🔗")
-                else:
-                    col1, col2 = st. columns([3, 1])
-                    with col1:
-                        st.markdown(f"**{title}** - {name}")
-                    with col2:
-                        if os.path.exists(url):
-                            with open(url, "rb") as f:
-                                st.download_button(
-                                    "⬇️ Download",
-                                    data=f,
-                                    file_name=name,
-                                    key=f"dl_{idx}"
-                                )
-    
-    with tab4:
-        st.subheader("📥 Export Options")
+        st.subheader("Export Options")
         
-        # Prepare export data
-        export_df = df. copy()
-        
-        # Add summary rows
-        summary_rows = []
-        for category, group in df.groupby("Category"):
-            summary_rows.append({
-                "Title": f"SUBTOTAL: {category}",
-                "Description": "",
-                "Date": "",
-                "Category": category,
-                "Cost": group["Cost"]. sum(),
-                "Receipt Filename": "",
-                "Receipt Link": ""
-            })
-        
-        # Add grand total
-        summary_rows.append({
-            "Title": "GRAND TOTAL",
-            "Description": "",
-            "Date": "",
-            "Category": "ALL CATEGORIES",
-            "Cost": df["Cost"].sum(),
-            "Receipt Filename": "",
-            "Receipt Link": ""
-        })
-        
-        # Export to Excel
-        excel_buffer = pd.ExcelWriter('damages_export.xlsx', engine='openpyxl')
-        
-        try:
-            # Main data sheet
-            export_df.to_excel(excel_buffer, sheet_name='Damage Entries', index=False)
+        # Prepare Excel file with multiple sheets
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Main entries sheet
+            df.to_excel(writer, sheet_name='Damage Entries', index=False)
             
             # Category summary sheet
-            category_summary_export = df.groupby("Category")["Cost"].agg(["count", "sum"]).reset_index()
-            category_summary_export.columns = ["Category", "Number of Entries", "Total Cost"]
-            category_summary_export.to_excel(excel_buffer, sheet_name='Category Summary', index=False)
+            category_summary_export = df.groupby("Category").agg({
+                "Cost": ["count", "sum"]
+            }).round(2)
+            category_summary_export.columns = ["Number of Entries", "Total Cost"]
+            category_summary_export. to_excel(writer, sheet_name='Category Summary')
             
-            # Summary with subtotals
-            summary_df = pd.concat([export_df, pd.DataFrame(summary_rows)], ignore_index=True)
-            summary_df.to_excel(excel_buffer, sheet_name='Full Report', index=False)
+            # Detailed report with subtotals
+            detailed_df = df.copy()
             
-            excel_buffer.close()
+            # Add subtotal rows
+            for category in df["Category"].unique():
+                cat_data = df[df["Category"] == category]
+                subtotal_row = {
+                    "Title": f"SUBTOTAL - {category}",
+                    "Description": "",
+                    "Date": "",
+                    "Category": category,
+                    "Cost": cat_data["Cost"].sum(),
+                    "Receipt": "",
+                    "Link": ""
+                }
+                detailed_df = pd. concat([detailed_df, pd. DataFrame([subtotal_row])], ignore_index=True)
             
-            with open('damages_export.xlsx', 'rb') as f:
-                excel_data = f.read()
+            # Add grand total
+            grand_total_row = {
+                "Title": "GRAND TOTAL",
+                "Description": "",
+                "Date": "",
+                "Category": "ALL CATEGORIES",
+                "Cost": df["Cost"].sum(),
+                "Receipt": "",
+                "Link": ""
+            }
+            detailed_df = pd.concat([detailed_df, pd.DataFrame([grand_total_row])], ignore_index=True)
             
-            col1, col2 = st. columns(2)
-            with col1:
-                st.download_button(
-                    "📊 Download Excel Report",
-                    data=excel_data,
-                    file_name=f"damages_report_{datetime. now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            
-            with col2:
-                csv_data = export_df.to_csv(index=False)
-                st.download_button(
-                    "📄 Download CSV",
-                    data=csv_data,
-                    file_name=f"damages_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-            
-        except Exception as e:
-            st.error(f"Error creating export: {e}")
+            detailed_df.to_excel(writer, sheet_name='Detailed Report', index=False)
+        
+        excel_data = output.getvalue()
+        
+        col1, col2 = st. columns(2)
+        with col1:
+            st.download_button(
+                "📊 Download Excel Report",
+                data=excel_data,
+                file_name=f"damage_report_{datetime. now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        
+        with col2:
+            csv_data = df.to_csv(index=False). encode('utf-8')
+            st.download_button(
+                "📄 Download CSV",
+                data=csv_data,
+                file_name=f"damages_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        # Instructions for upload
+        if st.session_state["drive_folder_configured"]:
+            st. info("""
+            📤 **To complete the process:**
+            1. Download the Excel report above
+            2. Upload any receipt files to your Google Drive folder
+            3. The links in the Excel file will work once files are uploaded
+            4. Share the Excel file and Google Drive folder with your attorney
+            """)
 
 else:
-    st.info("No damages recorded yet. Use the form above to add your first entry.")
+    st.info("No damages recorded yet. Add your first entry using the form above.")
 
 # --- Instructions ---
-with st.expander("📖 Instructions for Use"):
+with st.expander("📖 How to Use This App"):
     st.markdown("""
-    ### Getting Started:
-    1. **Configure Storage** (one time): Choose Google Drive or local storage in the configuration section
-    2. **Add Damages**: Fill out the form with damage details and upload receipts
-    3. **Review & Export**: View summaries and export to Excel for legal proceedings
+    ### Quick Start:
     
-    ### Features:
-    - ✅ Automatic categorization with subcategories
-    - ✅ Receipt/invoice upload with Google Drive integration
-    - ✅ Automatic cost calculations and summaries
-    - ✅ Excel export with clickable links to receipts
-    - ✅ Category-wise cost breakdown
+    1. **One-time Setup:**
+       - Create a folder in Google Drive
+       - Set it to "Anyone with link can view"
+       - Paste the folder URL in the configuration section
     
-    ### For Google Drive Integration:
-    - Files are automatically uploaded to your specified folder
-    - Links in the Excel file will open directly in Google Drive
-    - Ensure the folder is shared appropriately for others to view
+    2. **Adding Damages:**
+       - Fill out the form with damage details
+       - Upload receipt/invoice images
+       - Click "Add Damage Entry"
+       - Download the receipt file and upload it to your Google Drive folder
+    
+    3. **Export for Legal Use:**
+       - Review all entries in the summary
+       - Download the Excel report
+       - Share both the Excel file and Google Drive folder with your attorney
+    
+    ### Mobile Usage:
+    - This app works on all devices
+    - Take photos of receipts directly from your phone
+    - Upload and track damages on the go
     
     ### Tips:
-    - Be consistent with categories for better organization
-    - Include detailed descriptions for clarity in legal proceedings
-    - Upload all relevant receipts and invoices
-    - Export regularly to maintain backups
+    - Be consistent with categories
+    - Upload clear photos of all receipts
+    - Add descriptions for context
+    - Export regularly for backup
     """)
+
+# --- Footer ---
+st.markdown("---")
+st.caption("Damage Invoice Tracker v2.0 | Designed for legal proceedings documentation")
