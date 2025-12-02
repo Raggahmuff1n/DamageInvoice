@@ -6,7 +6,6 @@ from pathlib import Path
 import base64
 import io
 from PIL import Image
-import requests
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -120,7 +119,7 @@ SUBCATEGORIES = {
     ]
 }
 
-# --- Initialize Session State ---
+# --- Initialize Session State (without conflicting with widget keys) ---
 if "damages" not in st.session_state:
     st.session_state["damages"] = []
 
@@ -133,33 +132,11 @@ if "drive_folder_configured" not in st.session_state:
 if "uploaded_files_data" not in st.session_state:
     st.session_state["uploaded_files_data"] = {}
 
-# Initialize form fields
-form_fields = {
-    "title_input": "",
-    "description_input": "",
-    "date_input": datetime.today(),
-    "category_input": CATEGORY_LIST[0],
-    "subcategory_input": "",
-    "custom_category_input": "",
-    "cost_input": 0.0,
-    "image_input": None
-}
-
-for field, default in form_fields. items():
-    if field not in st.session_state:
-        st.session_state[field] = default
+# Track if form should be cleared
+if "clear_form" not in st.session_state:
+    st.session_state["clear_form"] = False
 
 # --- Helper Functions ---
-def create_download_link(file_data, filename):
-    """Create a download link for a file"""
-    b64 = base64.b64encode(file_data). decode()
-    mime_type = "application/octet-stream"
-    if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-        mime_type = "image/jpeg"
-    elif filename.lower().endswith('.pdf'):
-        mime_type = "application/pdf"
-    return f'<a href="data:{mime_type};base64,{b64}" download="{filename}">Download {filename}</a>'
-
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to session state and return base64 data"""
     bytes_data = uploaded_file.getvalue()
@@ -217,60 +194,64 @@ with st.expander("⚙️ Configure Google Drive Folder (One-time Setup)", expand
             st.rerun()
     
     with col2:
-        st. info("ℹ️ You'll manually upload files to this folder.  The app generates the links.")
+        st.info("ℹ️ You'll manually upload files to this folder. The app generates the links.")
 
 if st.session_state["drive_folder_configured"]:
     st.success(f"✅ Connected to folder: `{st.session_state['drive_folder_url']}`")
 
 # --- Entry Form ---
 st.markdown("---")
-st.subheader("📝 Add New Damage Entry")
+st. subheader("📝 Add New Damage Entry")
 
-with st.form("damage_form", clear_on_submit=False):
+with st. form("damage_form", clear_on_submit=True):
     # Responsive columns - stack on mobile
     col1, col2 = st.columns([1, 1])
     
     with col1:
         title = st.text_input(
             "Title *",
-            key="title_input",
-            placeholder="Brief description"
+            placeholder="Brief description",
+            key="form_title"
         )
         
         category = st.selectbox(
             "Category *",
             CATEGORY_LIST,
-            key="category_input"
+            key="form_category"
         )
         
         # Show subcategories if available
+        subcategory = ""
+        custom_subcategory = ""
         if category in SUBCATEGORIES:
             subcategory = st.selectbox(
                 f"Subcategory",
                 ["Select... "] + SUBCATEGORIES[category],
-                key="subcategory_input"
+                key="form_subcategory"
             )
             
             # Custom input for "Other" subcategory
-            if st.session_state.get("subcategory_input") == "Other":
-                custom_sub = st.text_input(
+            if subcategory == "Other":
+                custom_subcategory = st.text_input(
                     "Specify:",
-                    key="custom_subcategory_input",
-                    placeholder="Enter custom subcategory"
+                    placeholder="Enter custom subcategory",
+                    key="form_custom_subcategory"
                 )
         
         # Custom input for "Other" main category
+        custom_category = ""
         if category == "Other":
-            custom_cat = st.text_input(
+            custom_category = st. text_input(
                 "Specify category:",
-                key="custom_category_input",
-                placeholder="Enter custom category"
+                placeholder="Enter custom category",
+                key="form_custom_category"
             )
     
     with col2:
         date = st.date_input(
             "Date *",
-            key="date_input"
+            value=datetime.today(),
+            key="form_date"
         )
         
         cost = st.number_input(
@@ -278,23 +259,23 @@ with st.form("damage_form", clear_on_submit=False):
             min_value=0.0,
             step=0.01,
             format="%.2f",
-            key="cost_input",
-            placeholder=0.00
+            value=0.0,
+            key="form_cost"
         )
         
         description = st.text_area(
             "Description",
-            key="description_input",
             height=70,
-            placeholder="Additional details (optional)"
+            placeholder="Additional details (optional)",
+            key="form_description"
         )
     
     # File upload - full width for better mobile experience
     image_file = st.file_uploader(
         "📎 Upload Receipt/Invoice",
         type=["png", "jpg", "jpeg", "pdf"],
-        key="image_input",
-        help="Upload supporting documentation"
+        help="Upload supporting documentation",
+        key="form_file"
     )
     
     # Submit button - full width on mobile
@@ -306,9 +287,9 @@ with st.form("damage_form", clear_on_submit=False):
 
 # --- Handle Form Submission ---
 if submitted:
-    if not st.session_state["title_input"]:
-        st. error("❌ Please provide a title")
-    elif st.session_state["cost_input"] <= 0:
+    if not title:
+        st.error("❌ Please provide a title")
+    elif cost <= 0:
         st.error("❌ Please enter a valid cost amount")
     else:
         # Handle file upload
@@ -326,24 +307,24 @@ if submitted:
                 file_link = filename
         
         # Determine final category
-        if st.session_state["category_input"] == "Other":
-            final_category = st.session_state. get("custom_category_input", "Other")
-        elif category in SUBCATEGORIES and st.session_state. get("subcategory_input") not in ["Select...", None, ""]:
-            if st.session_state.get("subcategory_input") == "Other":
-                subcategory_text = st.session_state. get("custom_subcategory_input", "Other")
+        if category == "Other":
+            final_category = custom_category if custom_category else "Other"
+        elif category in SUBCATEGORIES and subcategory not in ["Select...", None, ""]:
+            if subcategory == "Other":
+                subcategory_text = custom_subcategory if custom_subcategory else "Other"
             else:
-                subcategory_text = st.session_state["subcategory_input"]
-            final_category = f"{st.session_state['category_input']} - {subcategory_text}"
+                subcategory_text = subcategory
+            final_category = f"{category} - {subcategory_text}"
         else:
-            final_category = st.session_state["category_input"]
+            final_category = category
         
         # Create entry
         entry = {
-            "Title": st.session_state["title_input"],
-            "Description": st.session_state["description_input"],
-            "Date": st.session_state["date_input"].strftime("%Y-%m-%d"),
+            "Title": title,
+            "Description": description,
+            "Date": date.strftime("%Y-%m-%d"),
             "Category": final_category,
-            "Cost": float(st.session_state["cost_input"]),
+            "Cost": float(cost),
             "Receipt": filename,
             "Link": file_link
         }
@@ -354,7 +335,7 @@ if submitted:
         st.success("✅ Damage entry added successfully!")
         
         if image_file and st.session_state["drive_folder_configured"]:
-            st.info(f"""
+            st. info(f"""
             📤 **Next Step:** Upload `{filename}` to your Google Drive folder:
             1. Download the file using the link below
             2. Upload to your Google Drive folder
@@ -372,9 +353,7 @@ if submitted:
                     key=f"download_{filename}"
                 )
         
-        # Clear form
-        for field, default in form_fields.items():
-            st.session_state[field] = default
+        # Trigger rerun to clear form
         st.rerun()
 
 # --- Display Damages ---
@@ -404,7 +383,7 @@ if st.session_state["damages"]:
         # Display entries
         for idx, row in df.iterrows():
             with st.expander(f"{row['Title']} - ${row['Cost']:,.2f} ({row['Date']})"):
-                col1, col2 = st. columns([2, 1])
+                col1, col2 = st.columns([2, 1])
                 with col1:
                     st.write(f"**Category:** {row['Category']}")
                     if row['Description']:
@@ -437,7 +416,7 @@ if st.session_state["damages"]:
             "Cost": ["count", "sum", "mean"]
         }).round(2)
         category_summary.columns = ["Count", "Total ($)", "Average ($)"]
-        category_summary = category_summary. sort_values("Total ($)", ascending=False)
+        category_summary = category_summary.sort_values("Total ($)", ascending=False)
         
         st.dataframe(category_summary, use_container_width=True)
         
@@ -462,6 +441,7 @@ if st.session_state["damages"]:
             
             # Detailed report with subtotals
             detailed_df = df.copy()
+            subtotal_rows = []
             
             # Add subtotal rows
             for category in df["Category"].unique():
@@ -475,7 +455,7 @@ if st.session_state["damages"]:
                     "Receipt": "",
                     "Link": ""
                 }
-                detailed_df = pd. concat([detailed_df, pd. DataFrame([subtotal_row])], ignore_index=True)
+                subtotal_rows.append(subtotal_row)
             
             # Add grand total
             grand_total_row = {
@@ -487,7 +467,11 @@ if st.session_state["damages"]:
                 "Receipt": "",
                 "Link": ""
             }
-            detailed_df = pd.concat([detailed_df, pd.DataFrame([grand_total_row])], ignore_index=True)
+            
+            # Combine all data
+            subtotal_df = pd.DataFrame(subtotal_rows)
+            grand_total_df = pd.DataFrame([grand_total_row])
+            detailed_df = pd.concat([detailed_df, subtotal_df, grand_total_df], ignore_index=True)
             
             detailed_df.to_excel(writer, sheet_name='Detailed Report', index=False)
         
@@ -515,7 +499,7 @@ if st.session_state["damages"]:
         
         # Instructions for upload
         if st.session_state["drive_folder_configured"]:
-            st. info("""
+            st.info("""
             📤 **To complete the process:**
             1. Download the Excel report above
             2. Upload any receipt files to your Google Drive folder
