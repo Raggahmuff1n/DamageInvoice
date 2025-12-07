@@ -5,10 +5,10 @@ import os
 from pathlib import Path
 import base64
 import io
-from PIL import Image
+import json
 
 # --- Page Configuration ---
-st.set_page_config(
+st. set_page_config(
     page_title="Damage Invoice Tracker", 
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 # --- Custom CSS for mobile responsiveness ---
-st.markdown("""
+st. markdown("""
 <style>
     /* Mobile responsive adjustments */
     @media (max-width: 768px) {
@@ -32,40 +32,27 @@ st.markdown("""
         }
     }
     
-    /* Make file uploader more prominent */
-    .uploadedFile {
-        background-color: #f0f8ff;
-        border-radius: 5px;
-        padding: 10px;
+    /* Project header styling */
+    . project-header {
+        background: linear-gradient(90deg, #1f4e79 0%, #2e75b6 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
     }
     
-    /* Style for clickable links */
-    .receipt-link {
-        color: #0066cc;
-        text-decoration: none;
-        font-weight: bold;
-    }
-    
-    .receipt-link:hover {
-        text-decoration: underline;
+    /* Delete button styling */
+    .delete-btn {
+        color: #ff4b4b;
     }
     
     /* Export section styling */
-    .export-section {
+    . export-section {
         background-color: #e8f4f8;
         padding: 1. 5rem;
         border-radius: 10px;
         margin-top: 1rem;
         border: 2px solid #1f77b4;
-    }
-    
-    /* Summary cards */
-    .summary-card {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #1f77b4;
-        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -141,23 +128,35 @@ SUBCATEGORIES = {
 if "damages" not in st.session_state:
     st.session_state["damages"] = []
 
-if "drive_folder_url" not in st.session_state:
+if "drive_folder_url" not in st. session_state:
     st.session_state["drive_folder_url"] = ""
 
 if "drive_folder_configured" not in st.session_state:
     st.session_state["drive_folder_configured"] = False
 
-if "uploaded_files_data" not in st.session_state:
+if "uploaded_files_data" not in st. session_state:
     st.session_state["uploaded_files_data"] = {}
+
+if "project_name" not in st.session_state:
+    st.session_state["project_name"] = ""
+
+if "project_created_date" not in st. session_state:
+    st.session_state["project_created_date"] = ""
+
+if "project_active" not in st. session_state:
+    st.session_state["project_active"] = False
+
+if "delete_mode" not in st. session_state:
+    st.session_state["delete_mode"] = False
 
 # --- Helper Functions ---
 def save_uploaded_file(uploaded_file):
-    """Save uploaded file to session state and return base64 data"""
+    """Save uploaded file to session state and return filename"""
     bytes_data = uploaded_file.getvalue()
-    filename = uploaded_file.name
+    filename = uploaded_file. name
     
     # Generate unique filename
-    timestamp = int(datetime.now().timestamp())
+    timestamp = int(datetime.now(). timestamp())
     unique_filename = f"{timestamp}_{filename}"
     
     # Store in session state
@@ -172,144 +171,169 @@ def save_uploaded_file(uploaded_file):
 def generate_drive_link(folder_url, filename):
     """Generate expected Google Drive link"""
     if folder_url:
-        # Clean the folder URL
-        folder_url = folder_url.rstrip('/')
+        folder_url = folder_url. rstrip('/')
         return f"{folder_url}/{filename}"
     return filename
 
-def create_comprehensive_excel_report(damages_df):
+def save_project_to_json():
+    """Save current project to JSON for download"""
+    project_data = {
+        "project_name": st.session_state["project_name"],
+        "project_created_date": st. session_state["project_created_date"],
+        "drive_folder_url": st.session_state["drive_folder_url"],
+        "damages": st.session_state["damages"],
+        "last_saved": datetime.now(). strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return json.dumps(project_data, indent=2)
+
+def load_project_from_json(json_data):
+    """Load project from JSON data"""
+    try:
+        project_data = json.loads(json_data)
+        st.session_state["project_name"] = project_data.get("project_name", "")
+        st.session_state["project_created_date"] = project_data.get("project_created_date", "")
+        st.session_state["drive_folder_url"] = project_data.get("drive_folder_url", "")
+        st.session_state["drive_folder_configured"] = bool(project_data. get("drive_folder_url"))
+        st.session_state["damages"] = project_data.get("damages", [])
+        st.session_state["project_active"] = True
+        return True
+    except Exception as e:
+        st.error(f"Error loading project: {e}")
+        return False
+
+def delete_damage_entry(index):
+    """Delete a damage entry by index"""
+    if 0 <= index < len(st.session_state["damages"]):
+        deleted_item = st.session_state["damages"]. pop(index)
+        return deleted_item
+    return None
+
+def create_comprehensive_excel_report(damages_df, project_name):
     """Create a comprehensive, lawyer-friendly Excel report"""
     output = io.BytesIO()
     
     if len(damages_df) == 0:
-        # Handle empty dataframe
-        with pd. ExcelWriter(output, engine='openpyxl') as writer:
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
             empty_df = pd.DataFrame({'Message': ['No damages recorded yet']})
-            empty_df. to_excel(writer, sheet_name='No Data', index=False)
-        return output. getvalue()
+            empty_df.to_excel(writer, sheet_name='No Data', index=False)
+        return output.getvalue()
     
-    # Create Excel writer
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
         # ===== SHEET 1: EXECUTIVE SUMMARY =====
+        total_cost = damages_df['Cost'].sum()
+        
         summary_data = []
         summary_data.append(['DAMAGE CLAIM SUMMARY REPORT', '', ''])
+        summary_data.append([f'Project: {project_name}', '', ''])
         summary_data.append(['', '', ''])
         summary_data.append(['Report Generated:', datetime.now().strftime("%Y-%m-%d %H:%M"), ''])
-        summary_data. append(['', '', ''])
-        summary_data.append(['KEY METRICS', '', ''])
-        summary_data.append(['Total Damages Claimed:', f"${damages_df['Cost'].sum():,.2f}", ''])
-        summary_data.append(['Number of Damage Items:', len(damages_df), ''])
-        summary_data.append(['Number of Categories:', damages_df['Category'].nunique(), ''])
-        summary_data. append(['Average Damage Amount:', f"${damages_df['Cost'].mean():,.2f}", ''])
-        summary_data. append(['Highest Single Damage:', f"${damages_df['Cost'].max():,.2f}", ''])
-        summary_data.append(['Lowest Single Damage:', f"${damages_df['Cost'].min():,.2f}", ''])
-        summary_data.append(['Date Range:', f"{damages_df['Date'].min()} to {damages_df['Date'].max()}", ''])
         summary_data.append(['', '', ''])
+        summary_data. append(['KEY METRICS', '', ''])
+        summary_data.append(['Total Damages Claimed:', f"${total_cost:,.2f}", ''])
+        summary_data.append(['Number of Damage Items:', len(damages_df), ''])
+        summary_data. append(['Number of Categories:', damages_df['Category']. nunique(), ''])
+        summary_data.append(['Average Damage Amount:', f"${damages_df['Cost']. mean():,.2f}", ''])
+        summary_data.append(['Highest Single Damage:', f"${damages_df['Cost'].max():,.2f}", ''])
+        summary_data.append(['Lowest Single Damage:', f"${damages_df['Cost'].min():,.2f}", ''])
+        summary_data.append(['Date Range:', f"{damages_df['Date']. min()} to {damages_df['Date'].max()}", ''])
+        summary_data. append(['', '', ''])
         summary_data.append(['CATEGORY BREAKDOWN', 'Amount', 'Percentage of Total'])
         
-        # Calculate category totals and percentages
-        total_cost = damages_df['Cost'].sum()
         for category in sorted(damages_df['Category'].unique()):
-            cat_total = damages_df[damages_df['Category'] == category]['Cost']. sum()
+            cat_total = damages_df[damages_df['Category'] == category]['Cost'].sum()
             percentage = (cat_total / total_cost * 100) if total_cost > 0 else 0
-            summary_data.append([category, f"${cat_total:,. 2f}", f"{percentage:.1f}%"])
+            summary_data. append([category, f"${cat_total:,.2f}", f"{percentage:.1f}%"])
         
         summary_data.append(['', '', ''])
-        summary_data.append(['GRAND TOTAL:', f"${total_cost:,.2f}", '100.0%'])
+        summary_data.append(['GRAND TOTAL:', f"${total_cost:,.2f}", '100. 0%'])
         
         summary_df = pd.DataFrame(summary_data)
         summary_df.to_excel(writer, sheet_name='Executive Summary', index=False, header=False)
         
         # ===== SHEET 2: ALL DAMAGES (CATEGORIZED) =====
         categorized_list = []
-        
-        # Headers for the sheet
         categorized_list.append(['COMPREHENSIVE DAMAGE LIST - ORGANIZED BY CATEGORY', '', '', '', '', '', ''])
-        categorized_list. append(['', '', '', '', '', '', ''])
+        categorized_list.append([f'Project: {project_name}', '', '', '', '', '', ''])
+        categorized_list.append(['', '', '', '', '', '', ''])
         
-        # Sort damages by category, then by date
-        sorted_df = damages_df.sort_values(['Category', 'Date'])
+        sorted_df = damages_df. sort_values(['Category', 'Date'])
         
         current_category = None
         category_totals = {}
         
         for _, row in sorted_df.iterrows():
             if current_category != row['Category']:
-                # Add previous category subtotal
                 if current_category is not None:
                     categorized_list.append(['', '', '', '', '', '', ''])
                     categorized_list. append([
-                        '', '', '', f'Subtotal for {current_category}:',
+                        '', '', '', f'SUBTOTAL - {current_category}:',
                         f"${category_totals[current_category]:,.2f}", '', ''
                     ])
-                    categorized_list.append(['', '', '', '', '', '', ''])
+                    categorized_list. append(['', '', '', '', '', '', ''])
                 
                 current_category = row['Category']
                 category_totals[current_category] = 0
                 
-                # Add category header
-                categorized_list.append([f"CATEGORY: {current_category}", '', '', '', '', '', ''])
-                categorized_list.append(['Date', 'Title', 'Description', 'Amount', 'Receipt File', 'Receipt Link', 'Notes'])
-                categorized_list.append(['', '', '', '', '', '', ''])
+                categorized_list.append([f"═══ CATEGORY: {current_category} ═══", '', '', '', '', '', ''])
+                categorized_list. append(['Date', 'Title', 'Description', 'Amount', 'Receipt File', 'Receipt Link', 'Notes'])
             
-            # Add damage entry
             categorized_list.append([
                 row['Date'],
                 row['Title'],
                 row. get('Description', ''),
-                f"${row['Cost']:,. 2f}",
-                row. get('Receipt', ''),
+                f"${row['Cost']:,.2f}",
+                row.get('Receipt', ''),
                 row.get('Link', ''),
-                ''  # Notes column for lawyer
+                ''
             ])
             
             category_totals[current_category] += row['Cost']
         
-        # Add final category subtotal
         if current_category:
             categorized_list.append(['', '', '', '', '', '', ''])
-            categorized_list. append([
-                '', '', '', f'Subtotal for {current_category}:',
-                f"${category_totals[current_category]:,.2f}", '', ''
+            categorized_list.append([
+                '', '', '', f'SUBTOTAL - {current_category}:',
+                f"${category_totals[current_category]:,. 2f}", '', ''
             ])
         
-        # Add grand total
         categorized_list.append(['', '', '', '', '', '', ''])
         categorized_list.append(['', '', '', '', '', '', ''])
         categorized_list.append([
-            '', '', '', 'GRAND TOTAL ALL DAMAGES:',
-            f"${damages_df['Cost'].sum():,. 2f}", '', ''
+            '═══════════════════', '', '', 'GRAND TOTAL ALL DAMAGES:',
+            f"${damages_df['Cost']. sum():,.2f}", '', ''
         ])
         
         categorized_df = pd.DataFrame(categorized_list)
-        categorized_df.to_excel(writer, sheet_name='All Damages Categorized', index=False, header=False)
+        categorized_df. to_excel(writer, sheet_name='All Damages Categorized', index=False, header=False)
         
         # ===== SHEET 3: CATEGORY ANALYSIS =====
         analysis_data = []
-        analysis_data.append(['DETAILED CATEGORY ANALYSIS', '', '', '', ''])
-        analysis_data.append(['', '', '', '', ''])
+        analysis_data. append(['DETAILED CATEGORY ANALYSIS', '', '', '', ''])
+        analysis_data.append([f'Project: {project_name}', '', '', '', ''])
+        analysis_data. append(['', '', '', '', ''])
         
-        for category in sorted(damages_df['Category'].unique()):
+        for category in sorted(damages_df['Category']. unique()):
             cat_data = damages_df[damages_df['Category'] == category]
             cat_total = cat_data['Cost'].sum()
             percentage = (cat_total / total_cost * 100) if total_cost > 0 else 0
             
-            analysis_data. append([f'CATEGORY: {category}', '', '', '', ''])
+            analysis_data. append([f'═══ {category} ═══', '', '', '', ''])
             analysis_data.append(['Number of Items:', len(cat_data), '', '', ''])
             analysis_data.append(['Total Amount:', f"${cat_total:,.2f}", '', '', ''])
-            analysis_data.append(['Percentage of Total:', f"{percentage:. 1f}%", '', '', ''])
+            analysis_data.append(['Percentage of Total:', f"{percentage:.1f}%", '', '', ''])
             analysis_data.append(['Average per Item:', f"${cat_data['Cost'].mean():,.2f}", '', '', ''])
-            analysis_data.append(['Highest Item:', f"${cat_data['Cost'].max():,.2f}", '', '', ''])
+            analysis_data.append(['Highest Item:', f"${cat_data['Cost']. max():,.2f}", '', '', ''])
             analysis_data.append(['Lowest Item:', f"${cat_data['Cost'].min():,.2f}", '', '', ''])
             analysis_data.append(['', '', '', '', ''])
         
-        analysis_df = pd.DataFrame(analysis_data)
+        analysis_df = pd. DataFrame(analysis_data)
         analysis_df.to_excel(writer, sheet_name='Category Analysis', index=False, header=False)
         
         # ===== SHEET 4: CHRONOLOGICAL LIST =====
         chrono_data = []
-        chrono_data.append(['CHRONOLOGICAL DAMAGE LIST', '', '', '', ''])
+        chrono_data.append(['CHRONOLOGICAL DAMAGE LIST WITH RUNNING TOTAL', '', '', '', ''])
+        chrono_data.append([f'Project: {project_name}', '', '', '', ''])
         chrono_data.append(['', '', '', '', ''])
         chrono_data.append(['Date', 'Category', 'Title', 'Amount', 'Running Total'])
         
@@ -327,7 +351,7 @@ def create_comprehensive_excel_report(damages_df):
             ])
         
         chrono_data.append(['', '', '', '', ''])
-        chrono_data. append(['', '', 'TOTAL:', f"${total_cost:,. 2f}", ''])
+        chrono_data.append(['', '', 'FINAL TOTAL:', f"${total_cost:,.2f}", ''])
         
         chrono_df = pd.DataFrame(chrono_data)
         chrono_df.to_excel(writer, sheet_name='Chronological View', index=False, header=False)
@@ -335,21 +359,25 @@ def create_comprehensive_excel_report(damages_df):
         # ===== SHEET 5: RECEIPT TRACKING =====
         receipt_data = []
         receipt_data.append(['RECEIPT DOCUMENTATION STATUS', '', '', ''])
+        receipt_data.append([f'Project: {project_name}', '', '', ''])
         receipt_data.append(['', '', '', ''])
-        receipt_data.append(['Status', 'Count', '', ''])
-        receipt_data. append(['Items with Receipts:', len(damages_df[damages_df['Receipt'] != '']), '', ''])
-        receipt_data.append(['Items without Receipts:', len(damages_df[damages_df['Receipt'] == '']), '', ''])
-        receipt_data.append(['Total Items:', len(damages_df), '', ''])
-        receipt_data. append(['', '', '', ''])
-        receipt_data.append(['ITEMS MISSING RECEIPTS:', '', '', ''])
-        receipt_data.append(['Date', 'Title', 'Amount', ''])
+        receipt_data.append(['Status', 'Count', 'Amount', ''])
         
-        missing_receipts = damages_df[damages_df['Receipt'] == '']
-        for _, row in missing_receipts.iterrows():
-            receipt_data.append([row['Date'], row['Title'], f"${row['Cost']:,.2f}", ''])
+        with_receipts = damages_df[damages_df['Receipt'] != '']
+        without_receipts = damages_df[damages_df['Receipt'] == '']
         
-        if len(missing_receipts) == 0:
-            receipt_data.append(['All items have receipts', '', '', ''])
+        receipt_data.append(['Items with Receipts:', len(with_receipts), f"${with_receipts['Cost'].sum():,.2f}", ''])
+        receipt_data.append(['Items without Receipts:', len(without_receipts), f"${without_receipts['Cost'].sum():,.2f}", ''])
+        receipt_data.append(['Total Items:', len(damages_df), f"${total_cost:,.2f}", ''])
+        receipt_data.append(['', '', '', ''])
+        
+        if len(without_receipts) > 0:
+            receipt_data.append(['ITEMS NEEDING RECEIPTS:', '', '', ''])
+            receipt_data.append(['Date', 'Title', 'Amount', ''])
+            for _, row in without_receipts.iterrows():
+                receipt_data.append([row['Date'], row['Title'], f"${row['Cost']:,. 2f}", ''])
+        else:
+            receipt_data.append(['All items have receipts uploaded ✓', '', '', ''])
         
         receipt_data.append(['', '', '', ''])
         receipt_data.append(['Google Drive Folder:', st.session_state. get("drive_folder_url", "Not configured"), '', ''])
@@ -359,7 +387,7 @@ def create_comprehensive_excel_report(damages_df):
     
     return output.getvalue()
 
-def create_legal_summary_document(damages_df):
+def create_legal_summary_document(damages_df, project_name):
     """Create a formatted text document for legal proceedings"""
     if len(damages_df) == 0:
         return "No damages recorded yet."
@@ -372,7 +400,8 @@ def create_legal_summary_document(damages_df):
                            LEGAL SUMMARY REPORT
 ================================================================================
 
-REPORT GENERATED: {datetime.now(). strftime('%Y-%m-%d at %H:%M')}
+PROJECT NAME: {project_name}
+REPORT GENERATED: {datetime. now().strftime('%Y-%m-%d at %H:%M')}
 
 --------------------------------------------------------------------------------
 I. EXECUTIVE SUMMARY
@@ -385,49 +414,51 @@ organized by category for legal proceedings.
 
 Key Statistics:
 • Total Number of Damage Items: {len(damages_df)}
-• Number of Categories: {damages_df['Category'].nunique()}
-• Date Range: {damages_df['Date'].min()} to {damages_df['Date'].max()}
-• Average Damage Amount: ${damages_df['Cost']. mean():,.2f}
+• Number of Categories: {damages_df['Category']. nunique()}
+• Date Range: {damages_df['Date'].min()} to {damages_df['Date']. max()}
+• Average Damage Amount: ${damages_df['Cost'].mean():,.2f}
 • Highest Single Damage: ${damages_df['Cost'].max():,. 2f}
 • Lowest Single Damage: ${damages_df['Cost'].min():,.2f}
 
 --------------------------------------------------------------------------------
-II. DAMAGE BREAKDOWN BY CATEGORY
+II.  DAMAGE BREAKDOWN BY CATEGORY
 --------------------------------------------------------------------------------
 """
     
-    # Add detailed breakdown by category
     for category in sorted(damages_df['Category'].unique()):
         cat_data = damages_df[damages_df['Category'] == category]
-        cat_total = cat_data['Cost']. sum()
+        cat_total = cat_data['Cost'].sum()
         percentage = (cat_total / total_cost * 100) if total_cost > 0 else 0
         
         summary += f"""
-{category.upper()}
+{category. upper()}
 {'=' * len(category)}
 Total: ${cat_total:,.2f} ({percentage:.1f}% of total damages)
 Number of Items: {len(cat_data)}
 Average per Item: ${cat_data['Cost'].mean():,.2f}
 
-Items:
+Itemized List:
 """
         for _, row in cat_data.iterrows():
             summary += f"  • {row['Date']} - {row['Title']}: ${row['Cost']:,.2f}\n"
-            if row.get('Description'):
+            if row. get('Description'):
                 summary += f"    Description: {row['Description']}\n"
             if row.get('Receipt'):
                 summary += f"    Receipt: {row['Receipt']}\n"
+        
+        summary += f"\n  CATEGORY SUBTOTAL: ${cat_total:,.2f}\n"
     
     summary += f"""
 --------------------------------------------------------------------------------
-III. CHRONOLOGICAL LISTING
+III.  CHRONOLOGICAL LISTING
 --------------------------------------------------------------------------------
 
 """
-    # Add chronological listing
     sorted_by_date = damages_df.sort_values('Date')
+    running_total = 0
     for _, row in sorted_by_date.iterrows():
-        summary += f"{row['Date']} | {row['Category']} | {row['Title']} | ${row['Cost']:,.2f}\n"
+        running_total += row['Cost']
+        summary += f"{row['Date']} | {row['Category'][:30]:30} | {row['Title'][:30]:30} | ${row['Cost']:>12,.2f} | Running: ${running_total:>12,.2f}\n"
     
     summary += f"""
 --------------------------------------------------------------------------------
@@ -442,17 +473,27 @@ Receipt Storage Location:
 {st.session_state.get('drive_folder_url', 'Not configured')}
 
 --------------------------------------------------------------------------------
-V. TOTAL DAMAGES SUMMARY
+V.  TOTAL DAMAGES SUMMARY
 --------------------------------------------------------------------------------
 
-GRAND TOTAL OF ALL DAMAGES: ${total_cost:,.2f}
+                    ╔═══════════════════════════════════════╗
+                    ║                                       ║
+                    ║   GRAND TOTAL OF ALL DAMAGES:         ║
+                    ║                                       ║
+                    ║        ${total_cost:>15,.2f}              ║
+                    ║                                       ║
+                    ╚═══════════════════════════════════════╝
 
 This amount represents the total of all documented damages with supporting 
-evidence as detailed above.
+evidence as detailed above. 
 
 --------------------------------------------------------------------------------
                            END OF REPORT
 --------------------------------------------------------------------------------
+Prepared for: Legal Proceedings
+Project: {project_name}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+================================================================================
 """
     
     return summary
@@ -461,443 +502,420 @@ evidence as detailed above.
 st.title("⚖️ Damage Invoice Tracker")
 st.markdown("### Legal Proceedings Documentation System")
 
-# --- Configuration Section ---
-with st.expander("⚙️ Configure Google Drive Folder (One-time Setup)", expanded=not st.session_state["drive_folder_configured"]):
-    st.markdown("""
-    📁 **Set your Google Drive folder where receipts will be stored**
-    
-    1. Create or open a folder in Google Drive
-    2. Right-click → "Get link" → Set to "Anyone with the link can view"
-    3. Copy the folder URL and paste below
-    """)
-    
-    drive_url = st.text_input(
-        "Google Drive Folder URL:",
-        value=st.session_state.get("drive_folder_url", "https://drive.google.com/drive/folders/1HIu5XR7pFg8s49AG8Yiu_7aCK9HMeT8N"),
-        help="Example: https://drive.google.com/drive/folders/..."
-    )
-    
-    col1, col2 = st. columns([1, 3])
-    with col1:
-        if st.button("Save Configuration", type="primary", use_container_width=True):
-            st.session_state["drive_folder_url"] = drive_url
-            st.session_state["drive_folder_configured"] = True
-            st.success("✅ Configuration saved!")
-            st.rerun()
-    
-    with col2:
-        st.info("ℹ️ You'll manually upload files to this folder.  The app generates the links.")
-
-if st.session_state["drive_folder_configured"]:
-    st. success(f"✅ Connected to folder: `{st.session_state['drive_folder_url']}`")
-
-# --- Entry Form ---
-st.markdown("---")
-st. subheader("📝 Add New Damage Entry")
-
-with st.form("damage_form", clear_on_submit=True):
-    # Responsive columns
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        title = st.text_input(
-            "Title *",
-            placeholder="Brief description",
-            key="form_title"
-        )
-        
-        category = st.selectbox(
-            "Category *",
-            CATEGORY_LIST,
-            key="form_category"
-        )
-        
-        # Show subcategories if available
-        subcategory = ""
-        custom_subcategory = ""
-        if category in SUBCATEGORIES:
-            subcategory = st.selectbox(
-                f"Subcategory",
-                ["Select... "] + SUBCATEGORIES[category],
-                key="form_subcategory"
-            )
-            
-            # Custom input for "Other" subcategory
-            if subcategory == "Other":
-                custom_subcategory = st.text_input(
-                    "Specify:",
-                    placeholder="Enter custom subcategory",
-                    key="form_custom_subcategory"
-                )
-        
-        # Custom input for "Other" main category
-        custom_category = ""
-        if category == "Other":
-            custom_category = st.text_input(
-                "Specify category:",
-                placeholder="Enter custom category",
-                key="form_custom_category"
-            )
-    
-    with col2:
-        date = st.date_input(
-            "Date *",
-            value=datetime.today(),
-            key="form_date"
-        )
-        
-        cost = st.number_input(
-            "Cost (USD) *",
-            min_value=0.0,
-            step=0.01,
-            format="%.2f",
-            value=0.0,
-            key="form_cost"
-        )
-        
-        description = st. text_area(
-            "Description",
-            height=70,
-            placeholder="Additional details (optional)",
-            key="form_description"
-        )
-    
-    # File upload
-    image_file = st.file_uploader(
-        "📎 Upload Receipt/Invoice",
-        type=["png", "jpg", "jpeg", "pdf"],
-        help="Upload supporting documentation",
-        key="form_file"
-    )
-    
-    # Submit button
-    submitted = st.form_submit_button(
-        "➕ Add Damage Entry",
-        type="primary",
-        use_container_width=True
-    )
-
-# --- Handle Form Submission ---
-if submitted:
-    if not title:
-        st.error("❌ Please provide a title")
-    elif cost <= 0:
-        st. error("❌ Please enter a valid cost amount")
-    else:
-        # Handle file upload
-        filename = ""
-        file_link = ""
-        
-        if image_file is not None:
-            # Save file to session state
-            filename = save_uploaded_file(image_file)
-            
-            # Generate Google Drive link
-            if st.session_state["drive_folder_configured"]:
-                file_link = generate_drive_link(st. session_state["drive_folder_url"], filename)
-            else:
-                file_link = filename
-        
-        # Determine final category
-        if category == "Other":
-            final_category = custom_category if custom_category else "Other"
-        elif category in SUBCATEGORIES and subcategory not in ["Select...", None, ""]:
-            if subcategory == "Other":
-                subcategory_text = custom_subcategory if custom_subcategory else "Other"
-            else:
-                subcategory_text = subcategory
-            final_category = f"{category} - {subcategory_text}"
-        else:
-            final_category = category
-        
-        # Create entry
-        entry = {
-            "Title": title,
-            "Description": description,
-            "Date": date. strftime("%Y-%m-%d"),
-            "Category": final_category,
-            "Cost": float(cost),
-            "Receipt": filename,
-            "Link": file_link
-        }
-        
-        st.session_state["damages"]. append(entry)
-        
-        # Show success message
-        st.success("✅ Damage entry added successfully!")
-        
-        if image_file and st.session_state["drive_folder_configured"]:
-            st.info(f"""
-            📤 **Next Step:** Upload `{filename}` to your Google Drive folder:
-            1. Download the file below
-            2. Upload to your Google Drive folder
-            3. The link in the spreadsheet will work automatically
-            """)
-            
-            # Provide download link
-            if filename in st.session_state["uploaded_files_data"]:
-                file_data = st.session_state["uploaded_files_data"][filename]['data']
-                st.download_button(
-                    label=f"⬇️ Download {filename} for Google Drive upload",
-                    data=file_data,
-                    file_name=filename,
-                    mime="application/octet-stream",
-                    key=f"download_{filename}"
-                )
-        
-        # Trigger rerun to clear form
-        st.rerun()
-
-# --- Display and Export Section ---
-st.markdown("---")
-st.header("📊 Damage Summary & Legal Documentation Export")
-
-if st.session_state["damages"]:
-    df = pd.DataFrame(st.session_state["damages"])
-    
-    # Calculate key metrics
-    total_cost = df["Cost"].sum()
-    
-    # Display comprehensive summary
-    st.markdown("### 💼 Case Summary")
-    
-    # Main metrics in columns
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("💰 **TOTAL DAMAGES**", f"${total_cost:,.2f}", 
-                 help="Total amount of all damages claimed")
-    with col2:
-        st.metric("📝 Total Items", len(df),
-                 help="Number of individual damage entries")
-    with col3:
-        st.metric("📊 Average Damage", f"${df['Cost'].mean():,.2f}",
-                 help="Average cost per damage item")
-    with col4:
-        st.metric("📁 Categories", df["Category"].nunique(),
-                 help="Number of different damage categories")
-    
-    # Category breakdown with visual cards
-    st.markdown("### 📂 Damage Categories Breakdown")
-    
-    # Create category summary with percentages
-    category_summary = []
-    for category in sorted(df['Category'].unique()):
-        cat_data = df[df['Category'] == category]
-        cat_total = cat_data['Cost']. sum()
-        percentage = (cat_total / total_cost * 100) if total_cost > 0 else 0
-        category_summary.append({
-            'Category': category,
-            'Total': cat_total,
-            'Count': len(cat_data),
-            'Percentage': percentage,
-            'Average': cat_data['Cost'].mean()
-        })
-    
-    # Display categories in expandable sections
-    for cat_info in category_summary:
-        with st. expander(f"**{cat_info['Category']}** - ${cat_info['Total']:,.2f} ({cat_info['Percentage']:.1f}%)"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.write(f"**Total:** ${cat_info['Total']:,.2f}")
-            with col2:
-                st.write(f"**Items:** {cat_info['Count']}")
-            with col3:
-                st.write(f"**Average:** ${cat_info['Average']:,.2f}")
-            
-            # Show items in this category
-            cat_items = df[df['Category'] == cat_info['Category']][['Date', 'Title', 'Cost', 'Receipt']]
-            for _, item in cat_items.iterrows():
-                receipt_status = "✅" if item['Receipt'] else "❌"
-                st.write(f"• {item['Date']} - {item['Title']}: **${item['Cost']:,.2f}** {receipt_status}")
-    
-    # Export Section - Prominently displayed
+# --- Project Management Section ---
+if not st.session_state["project_active"]:
     st.markdown("---")
-    st.markdown("### 📥 **Export for Attorney / Legal Proceedings**")
-    st.markdown('<div class="export-section">', unsafe_allow_html=True)
+    st. header("📁 Project Management")
     
-    st.markdown("#### 📋 Download Complete Legal Documentation Package:")
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    
-    with col1:
-        # Comprehensive Excel Report
-        excel_data = create_comprehensive_excel_report(df)
-        st.download_button(
-            "📊 **Download Complete Excel Report**",
-            data=excel_data,
-            file_name=f"Legal_Damage_Report_{datetime. now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            help="Comprehensive Excel report with multiple sheets including executive summary, categorized damages, and analysis"
-        )
-        st.caption("✓ Executive Summary\n✓ Categorized Damages\n✓ Category Analysis\n✓ Chronological View\n✓ Receipt Status")
-    
-    with col2:
-        # Legal Summary Document
-        legal_summary = create_legal_summary_document(df)
-        st.download_button(
-            "📄 **Download Legal Summary**",
-            data=legal_summary,
-            file_name=f"Legal_Summary_{datetime.now().strftime('%Y%m%d')}.txt",
-            mime="text/plain",
-            use_container_width=True,
-            help="Formatted text document suitable for legal proceedings"
-        )
-        st.caption("✓ Executive Summary\n✓ Category Breakdown\n✓ Chronological List\n✓ Receipt Status\n✓ Total Damages")
-    
-    with col3:
-        # Simple CSV for database import
-        csv_data = df. to_csv(index=False). encode('utf-8')
-        st.download_button(
-            "📈 **Download CSV Data**",
-            data=csv_data,
-            file_name=f"Damage_Data_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-            help="Simple CSV format for database import or additional analysis"
-        )
-        st.caption("✓ Raw Data Format\n✓ Import to Any System\n✓ Maximum Compatibility")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Attorney instructions
-    st.info(f"""
-    📨 **Instructions for Your Attorney:**
-    
-    1.  **Download the Complete Excel Report** - This contains all damage information organized in 5 comprehensive sheets
-    2. **Review the Executive Summary** sheet for a quick overview of total damages (${total_cost:,.2f})
-    3. **Check the "All Damages Categorized"** sheet for detailed itemization with subtotals by category
-    4. **Access receipts** via the Google Drive folder link
-    5. **Use the Legal Summary** document for quick reference during proceedings
-    
-    **Google Drive Receipts Folder:** {st.session_state.get('drive_folder_url', 'Not configured')}
-    """)
-    
-    # Additional Analysis Tabs
-    st.markdown("---")
-    st.markdown("### 📊 Detailed Analysis")
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 All Entries", "📊 Visual Analysis", "📅 Timeline", "📎 Receipt Status"])
+    tab1, tab2 = st.tabs(["🆕 Create New Project", "📂 Load Existing Project"])
     
     with tab1:
-        # Sortable, searchable dataframe
-        st.subheader("Complete Damage List")
-        display_df = df. copy()
-        display_df['Cost_Display'] = display_df['Cost']. apply(lambda x: f"${x:,.2f}")
-        display_df['Has Receipt'] = display_df['Receipt']. apply(lambda x: '✅' if x else '❌')
-        st.dataframe(
-            display_df[['Date', 'Category', 'Title', 'Description', 'Cost_Display', 'Has Receipt']]. rename(columns={'Cost_Display': 'Cost'}),
-            use_container_width=True,
-            height=400
+        st.subheader("Start a New Damage Claim Project")
+        
+        new_project_name = st.text_input(
+            "Project Name *",
+            placeholder="e.g., Smith vs. Johnson - Vehicle Accident 2024",
+            help="Give your project a descriptive name for easy identification"
         )
+        
+        project_description = st. text_area(
+            "Case Description (optional)",
+            placeholder="Brief description of the case and damages being tracked.. .",
+            height=100
+        )
+        
+        if st.button("🚀 Create Project", type="primary", use_container_width=True):
+            if new_project_name:
+                st.session_state["project_name"] = new_project_name
+                st.session_state["project_created_date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                st.session_state["project_active"] = True
+                st.session_state["damages"] = []
+                st.success(f"✅ Project '{new_project_name}' created successfully!")
+                st.rerun()
+            else:
+                st. error("❌ Please enter a project name")
     
     with tab2:
-        # Visual breakdown
-        st.subheader("Visual Category Breakdown")
+        st.subheader("Load a Previously Saved Project")
         
-        # Category totals for chart
-        category_totals = df.groupby('Category')['Cost'].sum().sort_values(ascending=False)
+        uploaded_project = st.file_uploader(
+            "Upload Project File (. json)",
+            type=["json"],
+            help="Select a previously saved project file to continue working"
+        )
         
-        # Bar chart
-        st.bar_chart(category_totals)
+        if uploaded_project is not None:
+            if st.button("📂 Load Project", type="primary", use_container_width=True):
+                json_data = uploaded_project.read(). decode('utf-8')
+                if load_project_from_json(json_data):
+                    st.success(f"✅ Project '{st.session_state['project_name']}' loaded successfully!")
+                    st.rerun()
         
-        # Summary statistics
-        st.subheader("Statistical Summary")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Top 5 Highest Damages:**")
-            top_5 = df.nlargest(5, 'Cost')[['Title', 'Cost']]
-            for _, item in top_5.iterrows():
-                st.write(f"• {item['Title']}: ${item['Cost']:,.2f}")
-        
-        with col2:
-            st.write("**Category Rankings:**")
-            for i, (cat, total) in enumerate(category_totals.head(5).items(), 1):
-                st.write(f"{i}. {cat}: ${total:,.2f}")
-    
-    with tab3:
-        # Timeline view
-        st.subheader("Damage Timeline")
-        
-        # Group by month
-        df_timeline = df.copy()
-        df_timeline['Date_parsed'] = pd.to_datetime(df_timeline['Date'])
-        df_timeline['Month'] = df_timeline['Date_parsed'].dt.strftime('%Y-%m')
-        
-        monthly_totals = df_timeline.groupby('Month')['Cost'].sum()
-        st.line_chart(monthly_totals)
-        
-        # Monthly breakdown table
-        monthly_summary = df_timeline.groupby('Month').agg({
-            'Cost': ['count', 'sum', 'mean']
-        }).round(2)
-        monthly_summary.columns = ['Count', 'Total ($)', 'Average ($)']
-        st.dataframe(monthly_summary, use_container_width=True)
-    
-    with tab4:
-        # Receipt tracking
-        st.subheader("Receipt Documentation Status")
-        
-        receipts_uploaded = len(df[df['Receipt'] != ''])
-        receipts_missing = len(df[df['Receipt'] == ''])
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("✅ Receipts Uploaded", receipts_uploaded)
-        with col2:
-            st.metric("❌ Receipts Missing", receipts_missing)
-        
-        # List items missing receipts
-        if receipts_missing > 0:
-            st.warning(f"**{receipts_missing} items are missing receipts:**")
-            missing_receipts = df[df['Receipt'] == ''][['Date', 'Title', 'Cost']]
-            for _, item in missing_receipts.iterrows():
-                st.write(f"• {item['Date']} - {item['Title']}: ${item['Cost']:,.2f}")
-        else:
-            st.success("✅ All items have receipts uploaded!")
-        
-        # Google Drive folder reminder
-        if st.session_state["drive_folder_configured"]:
-            st.info(f"📁 **Receipt Storage:** [{st.session_state['drive_folder_url']}]({st.session_state['drive_folder_url']})")
+        st.markdown("---")
+        st.info("""
+        💡 **How Project Files Work:**
+        - When you save your project, you download a `.json` file
+        - Keep this file safe - it contains all your damage entries
+        - Upload it here to continue working on your project
+        - You can save as many versions as you want
+        """)
 
 else:
-    st.info("No damages recorded yet. Add your first entry using the form above.")
+    # --- Active Project Header ---
+    st. markdown(f"""
+    <div style="background: linear-gradient(90deg, #1f4e79 0%, #2e75b6 100%); 
+                color: white; padding: 1rem; border-radius: 10px; margin-bottom: 1rem;">
+        <h3 style="margin: 0;">📁 Project: {st.session_state['project_name']}</h3>
+        <p style="margin: 0. 5rem 0 0 0; font-size: 0.9rem;">
+            Created: {st.session_state['project_created_date']} | 
+            Entries: {len(st.session_state['damages'])} | 
+            Total: ${sum(d['Cost'] for d in st.session_state['damages']):,.2f}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # --- Project Actions ---
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # Save Project
+        project_json = save_project_to_json()
+        st.download_button(
+            "💾 Save Project",
+            data=project_json,
+            file_name=f"{st.session_state['project_name']. replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Download project file to continue later"
+        )
+    
+    with col2:
+        if st.button("🔄 Switch Project", use_container_width=True):
+            st.session_state["project_active"] = False
+            st.rerun()
+    
+    with col3:
+        # Toggle delete mode
+        delete_label = "✅ Done Editing" if st. session_state["delete_mode"] else "🗑️ Edit/Delete Entries"
+        if st.button(delete_label, use_container_width=True):
+            st. session_state["delete_mode"] = not st.session_state["delete_mode"]
+            st.rerun()
+    
+    with col4:
+        if st. button("📤 Export for Attorney", use_container_width=True, type="primary"):
+            st.session_state["show_export"] = True
+    
+    # --- Configuration Section ---
+    with st.expander("⚙️ Configure Google Drive Folder", expanded=not st.session_state["drive_folder_configured"]):
+        st.markdown("""
+        📁 **Set your Google Drive folder where receipts will be stored**
+        """)
+        
+        drive_url = st.text_input(
+            "Google Drive Folder URL:",
+            value=st.session_state.get("drive_folder_url", ""),
+            help="Example: https://drive. google.com/drive/folders/..."
+        )
+        
+        if st. button("Save Configuration"):
+            st.session_state["drive_folder_url"] = drive_url
+            st.session_state["drive_folder_configured"] = True
+            st. success("✅ Configuration saved!")
+            st.rerun()
 
-# --- Instructions ---
-with st.expander("📖 How to Use for Legal Documentation"):
-    st.markdown("""
-    ### For Legal Proceedings:
+    if st.session_state["drive_folder_configured"]:
+        st.success(f"✅ Google Drive folder configured")
     
-    **Step 1: Document All Damages**
-    - Add each damage with detailed information
-    - Upload all receipts and invoices
-    - Be specific in descriptions
+    # --- Delete Mode UI ---
+    if st.session_state["delete_mode"]:
+        st.markdown("---")
+        st.warning("🗑️ **Edit Mode Active** - Click the ❌ button next to any entry to delete it")
+        
+        if st.session_state["damages"]:
+            for idx, damage in enumerate(st.session_state["damages"]):
+                col1, col2, col3, col4, col5 = st.columns([1, 2, 3, 2, 1])
+                
+                with col1:
+                    st.write(f"#{idx + 1}")
+                with col2:
+                    st.write(damage['Date'])
+                with col3:
+                    st.write(f"{damage['Title'][:40]}...")
+                with col4:
+                    st.write(f"${damage['Cost']:,.2f}")
+                with col5:
+                    if st.button("❌", key=f"delete_{idx}", help=f"Delete: {damage['Title']}"):
+                        deleted = delete_damage_entry(idx)
+                        if deleted:
+                            st.success(f"Deleted: {deleted['Title']}")
+                            st.rerun()
+        else:
+            st. info("No entries to delete")
     
-    **Step 2: Review and Verify**
-    - Check the category breakdown for accuracy
-    - Ensure all receipts are uploaded
-    - Verify dates and amounts
+    else:
+        # --- Entry Form (only show when not in delete mode) ---
+        st.markdown("---")
+        st.subheader("📝 Add New Damage Entry")
+
+        with st.form("damage_form", clear_on_submit=True):
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                title = st.text_input(
+                    "Title *",
+                    placeholder="Brief description",
+                    key="form_title"
+                )
+                
+                category = st.selectbox(
+                    "Category *",
+                    CATEGORY_LIST,
+                    key="form_category"
+                )
+                
+                subcategory = ""
+                custom_subcategory = ""
+                if category in SUBCATEGORIES:
+                    subcategory = st. selectbox(
+                        f"Subcategory",
+                        ["Select... "] + SUBCATEGORIES[category],
+                        key="form_subcategory"
+                    )
+                    
+                    if subcategory == "Other":
+                        custom_subcategory = st.text_input(
+                            "Specify:",
+                            placeholder="Enter custom subcategory",
+                            key="form_custom_subcategory"
+                        )
+                
+                custom_category = ""
+                if category == "Other":
+                    custom_category = st.text_input(
+                        "Specify category:",
+                        placeholder="Enter custom category",
+                        key="form_custom_category"
+                    )
+            
+            with col2:
+                date = st.date_input(
+                    "Date *",
+                    value=datetime.today(),
+                    key="form_date"
+                )
+                
+                cost = st.number_input(
+                    "Cost (USD) *",
+                    min_value=0. 0,
+                    step=0.01,
+                    format="%.2f",
+                    value=0.0,
+                    key="form_cost"
+                )
+                
+                description = st.text_area(
+                    "Description",
+                    height=70,
+                    placeholder="Additional details (optional)",
+                    key="form_description"
+                )
+            
+            image_file = st. file_uploader(
+                "📎 Upload Receipt/Invoice",
+                type=["png", "jpg", "jpeg", "pdf"],
+                help="Upload supporting documentation",
+                key="form_file"
+            )
+            
+            submitted = st.form_submit_button(
+                "➕ Add Damage Entry",
+                type="primary",
+                use_container_width=True
+            )
+
+        # --- Handle Form Submission ---
+        if submitted:
+            if not title:
+                st.error("❌ Please provide a title")
+            elif cost <= 0:
+                st.error("❌ Please enter a valid cost amount")
+            else:
+                filename = ""
+                file_link = ""
+                
+                if image_file is not None:
+                    filename = save_uploaded_file(image_file)
+                    if st.session_state["drive_folder_configured"]:
+                        file_link = generate_drive_link(st.session_state["drive_folder_url"], filename)
+                    else:
+                        file_link = filename
+                
+                if category == "Other":
+                    final_category = custom_category if custom_category else "Other"
+                elif category in SUBCATEGORIES and subcategory not in ["Select...", None, ""]:
+                    if subcategory == "Other":
+                        subcategory_text = custom_subcategory if custom_subcategory else "Other"
+                    else:
+                        subcategory_text = subcategory
+                    final_category = f"{category} - {subcategory_text}"
+                else:
+                    final_category = category
+                
+                entry = {
+                    "Title": title,
+                    "Description": description,
+                    "Date": date. strftime("%Y-%m-%d"),
+                    "Category": final_category,
+                    "Cost": float(cost),
+                    "Receipt": filename,
+                    "Link": file_link
+                }
+                
+                st.session_state["damages"].append(entry)
+                st.success("✅ Damage entry added successfully!")
+                
+                if image_file and st.session_state["drive_folder_configured"]:
+                    st.info(f"📤 Upload `{filename}` to your Google Drive folder")
+                    if filename in st.session_state["uploaded_files_data"]:
+                        file_data = st. session_state["uploaded_files_data"][filename]['data']
+                        st.download_button(
+                            label=f"⬇️ Download {filename}",
+                            data=file_data,
+                            file_name=filename,
+                            mime="application/octet-stream",
+                            key=f"download_{filename}"
+                        )
+                
+                st.rerun()
     
-    **Step 3: Export for Attorney**
-    - Download the **Complete Excel Report** (primary document)
-    - Download the **Legal Summary** for quick reference
-    - Share your Google Drive folder with view access
-    
-    **What Your Attorney Receives:**
-    1. **Executive Summary** with total damages and breakdown
-    2. **Itemized list** organized by category with subtotals
-    3. **Category analysis** showing impact of each damage type
-    4. **Chronological view** with running totals
-    5. **Receipt tracking** for verification
-    6. **Direct links** to all supporting documents
-    
-    **Tips for Legal Use:**
-    - Keep descriptions factual and concise
-    - Upload clear, legible receipts
-    - Maintain chronological accuracy
-    - Document everything, no matter how small
-    """)
+    # --- Display and Export Section ---
+    st. markdown("---")
+    st.header("📊 Damage Summary")
+
+    if st.session_state["damages"]:
+        df = pd.DataFrame(st.session_state["damages"])
+        
+        total_cost = df["Cost"].sum()
+        
+        # Main metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("💰 TOTAL DAMAGES", f"${total_cost:,.2f}")
+        with col2:
+            st.metric("📝 Total Items", len(df))
+        with col3:
+            st. metric("📊 Average", f"${df['Cost']. mean():,.2f}")
+        with col4:
+            st.metric("📁 Categories", df["Category"].nunique())
+        
+        # Category breakdown
+        st.markdown("### 📂 Breakdown by Category")
+        
+        for category in sorted(df['Category'].unique()):
+            cat_data = df[df['Category'] == category]
+            cat_total = cat_data['Cost'].sum()
+            percentage = (cat_total / total_cost * 100) if total_cost > 0 else 0
+            
+            with st.expander(f"**{category}** - ${cat_total:,. 2f} ({percentage:.1f}%)", expanded=False):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write(f"**Total:** ${cat_total:,.2f}")
+                with col2:
+                    st.write(f"**Items:** {len(cat_data)}")
+                with col3:
+                    st. write(f"**Average:** ${cat_data['Cost'].mean():,.2f}")
+                
+                st.markdown("**Items:**")
+                for _, item in cat_data. iterrows():
+                    receipt_status = "✅" if item['Receipt'] else "❌"
+                    st.write(f"• {item['Date']} - {item['Title']}: **${item['Cost']:,. 2f}** {receipt_status}")
+        
+        # Grand Total Display
+        st.markdown("---")
+        st. markdown(f"""
+        <div style="background-color: #d4edda; padding: 1. 5rem; border-radius: 10px; 
+                    border: 2px solid #28a745; text-align: center;">
+            <h2 style="color: #155724; margin: 0;">💰 GRAND TOTAL DAMAGES</h2>
+            <h1 style="color: #155724; margin: 0. 5rem 0; font-size: 3rem;">${total_cost:,. 2f}</h1>
+            <p style="color: #155724; margin: 0;">{len(df)} items across {df['Category']. nunique()} categories</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Export Section
+        st.markdown("---")
+        st.markdown("### 📥 Export for Attorney")
+        
+        col1, col2, col3 = st.columns([1, 1, 1])
+        
+        with col1:
+            excel_data = create_comprehensive_excel_report(df, st.session_state["project_name"])
+            st.download_button(
+                "📊 Download Excel Report",
+                data=excel_data,
+                file_name=f"{st.session_state['project_name'].replace(' ', '_')}_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.caption("Complete formatted report")
+        
+        with col2:
+            legal_summary = create_legal_summary_document(df, st.session_state["project_name"])
+            st. download_button(
+                "📄 Download Legal Summary",
+                data=legal_summary,
+                file_name=f"{st.session_state['project_name'].replace(' ', '_')}_Legal_Summary.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+            st. caption("Formatted text document")
+        
+        with col3:
+            csv_data = df.to_csv(index=False). encode('utf-8')
+            st. download_button(
+                "📈 Download CSV Data",
+                data=csv_data,
+                file_name=f"{st.session_state['project_name'].replace(' ', '_')}_Data. csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            st.caption("Raw data format")
+        
+        # View tabs
+        st.markdown("---")
+        tab1, tab2, tab3 = st. tabs(["📋 All Entries", "📊 Charts", "📎 Receipts"])
+        
+        with tab1:
+            display_df = df.copy()
+            display_df['Cost_Display'] = display_df['Cost'].apply(lambda x: f"${x:,.2f}")
+            display_df['Has Receipt'] = display_df['Receipt'].apply(lambda x: '✅' if x else '❌')
+            st.dataframe(
+                display_df[['Date', 'Category', 'Title', 'Description', 'Cost_Display', 'Has Receipt']]. rename(columns={'Cost_Display': 'Cost'}),
+                use_container_width=True,
+                height=400
+            )
+        
+        with tab2:
+            category_totals = df.groupby('Category')['Cost'].sum(). sort_values(ascending=False)
+            st.bar_chart(category_totals)
+        
+        with tab3:
+            receipts_uploaded = len(df[df['Receipt'] != ''])
+            receipts_missing = len(df[df['Receipt'] == ''])
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("✅ With Receipts", receipts_uploaded)
+            with col2:
+                st.metric("❌ Missing Receipts", receipts_missing)
+            
+            if receipts_missing > 0:
+                st.warning(f"**{receipts_missing} items need receipts:**")
+                for _, item in df[df['Receipt'] == '']. iterrows():
+                    st.write(f"• {item['Date']} - {item['Title']}: ${item['Cost']:,. 2f}")
+
+    else:
+        st.info("No damages recorded yet. Add your first entry using the form above.")
 
 # --- Footer ---
 st.markdown("---")
-st. caption("Damage Invoice Tracker v3.0 | Professional Legal Documentation System")
+st.caption("Damage Invoice Tracker v4.0 | Legal Documentation System")
